@@ -58,13 +58,22 @@ jobs:
             --jq '.[] | "\(.tagName) \(.isPrerelease)"' >releases.txt
           cut -d' ' -f1 releases.txt | sh bin/select-tags >selected.txt
           sh bin/download-releases releases.txt releases <selected.txt
-          # The live index, kept by hash one generation back; a 404 (first run, new suite) just means none.
+          # The live index, kept by hash one generation back. A 404 (first run, new suite) means none; any other
+          # failure fails the run, so a deploy never drops the index clients with the cached InRelease still need.
           for suite in trixie trixie-test; do
             for arch in amd64 arm64; do
               dir=previous/dists/$suite/main/binary-$arch
               mkdir -p "$dir"
-              curl -fsS --retry 3 -o "$dir/Packages.gz" "https://apt.andaru.io/dists/$suite/main/binary-$arch/Packages.gz" ||
-                rm -f "$dir/Packages.gz"
+              status=$(curl -sS --retry 3 -o "$dir/Packages.gz" -w '%{http_code}' \
+                "https://apt.andaru.io/dists/$suite/main/binary-$arch/Packages.gz") || status=000
+              case $status in
+              200) ;;
+              404) rm -f "$dir/Packages.gz" ;;
+              *)
+                echo "::error::fetching the live $suite/$arch index returned HTTP $status"
+                exit 1
+                ;;
+              esac
             done
           done
 
