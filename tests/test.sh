@@ -51,6 +51,7 @@ check "check-expiry passes for a subkey expiring after the window" \
 	'GNUPGHOME="$work/gnupg-expiry" sh "$here/bin/check-expiry" "$expiring" 10'
 
 # A throwaway signing key, as the workflow imports the real subkey.
+# shellcheck disable=SC2031 # the subshell above used its own GNUPGHOME
 export GNUPGHOME="$work/gnupg"
 mkdir -m 0700 "$GNUPGHOME"
 printf "%s\n" quiet >"$GNUPGHOME/gpg.conf"
