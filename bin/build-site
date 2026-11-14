@@ -1,0 +1,79 @@
+#!/bin/sh
+# Builds the signed repository from Andaru's releases.
+#   build-site RELEASES OUT
+# RELEASES holds a directory per release tag: its .deb files, its SHA256SUMS, and a file named prerelease for a
+# prerelease. Releases go to the trixie suite; trixie-test has prereleases too. Every package must match its
+# release's SHA256SUMS, or nothing is built. SIGNING_KEY names the key in GNUPGHOME that signs.
+set -eu
+
+releases=$1
+out=$2
+: "${SIGNING_KEY:?SIGNING_KEY names the signing key}"
+here=$(cd "$(dirname "$0")/.." && pwd)
+
+for release in "$releases"/*/; do
+	for deb in "$release"*.deb; do
+		[ -e "$deb" ] || continue
+		grep -q "  $(basename "$deb")\$" "$release/SHA256SUMS" || {
+			echo "build-site: $deb is not in its release's SHA256SUMS" >&2
+			exit 1
+		}
+	done
+	(cd "$release" && sha256sum -c --quiet SHA256SUMS) || {
+		echo "build-site: $release does not match its SHA256SUMS" >&2
+		exit 1
+	}
+done
+
+site=$(mktemp -d)
+trap 'rm -rf -- "$site"' EXIT
+for release in "$releases"/*/; do
+	for deb in "$release"*.deb; do
+		[ -e "$deb" ] || continue
+		package=$(dpkg-deb -f "$deb" Package)
+		mkdir -p "$site/pool/main/a/$package"
+		cp "$deb" "$site/pool/main/a/$package/"
+		[ ! -e "$release/prerelease" ] || echo "pool/main/a/$package/$(basename "$deb")" >>"$site/prereleases"
+	done
+done
+touch "$site/prereleases"
+
+cd "$site"
+date=$(date -u -R)
+for suite in trixie trixie-test; do
+	for arch in amd64 arm64; do
+		dir=dists/$suite/main/binary-$arch
+		mkdir -p "$dir"
+		apt-ftparchive -a "$arch" packages pool >"$dir/Packages.all"
+		if [ "$suite" = trixie ]; then
+			# Drop the stanzas whose Filename is a prerelease's.
+			awk 'FILENAME == "prereleases" { pre["Filename: " $0] = 1; next }
+				{ keep = 1; n = split($0, lines, "\n"); for (i = 1; i <= n; i++) if (lines[i] in pre) keep = 0 }
+				keep { print $0 "\n" }' prereleases RS= "$dir/Packages.all" >"$dir/Packages"
+		else
+			mv "$dir/Packages.all" "$dir/Packages"
+		fi
+		rm -f "$dir/Packages.all"
+		gzip -9n -k "$dir/Packages"
+	done
+	apt-ftparchive \
+		-o APT::FTPArchive::Release::Origin=Andaru -o APT::FTPArchive::Release::Label=Andaru \
+		-o APT::FTPArchive::Release::Suite="$suite" -o APT::FTPArchive::Release::Codename="$suite" \
+		-o APT::FTPArchive::Release::Architectures="amd64 arm64" -o APT::FTPArchive::Release::Components=main \
+		-o APT::FTPArchive::Release::Date="$date" -o APT::FTPArchive::Release::ValidTime=1209600 \
+		release "dists/$suite" >Release
+	mv Release "dists/$suite/Release"
+	gpg --batch --yes --local-user "$SIGNING_KEY!" --clearsign -o "dists/$suite/InRelease" "dists/$suite/Release"
+	gpg --batch --yes --local-user "$SIGNING_KEY!" --armor --detach-sign -o "dists/$suite/Release.gpg" "dists/$suite/Release"
+done
+rm prereleases
+
+# The bootstrap: the keyring packages and their checksums at the root, and the armoured key.
+cp pool/main/a/andaru-archive-keyring/*.deb .
+sha256sum ./*.deb | sed 's| \./| |' >SHA256SUMS
+cp "$here/andaru-archive-key.asc" "$here/README.md" .
+echo apt.andaru.io >CNAME
+
+cd - >/dev/null
+mkdir -p "$(dirname "$out")"
+cp -r "$site" "$out"

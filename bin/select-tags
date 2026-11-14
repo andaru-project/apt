@@ -1,0 +1,9 @@
+#!/bin/sh
+# Reads Andaru's release tags on stdin and prints the ones the repository serves: every keyring-* release, and the
+# five newest Andaru versions (v1.2.3-rcN is 1.2.3~rcN, older than 1.2.3). Older releases stay on GitHub only:
+# a release is about 25 MB, and GitHub Pages sites are limited to 1 GB.
+set -eu
+
+tags=$(cat)
+printf '%s\n' "$tags" | grep '^keyring-' || true
+printf '%s\n' "$tags" | grep '^v' | sed 's/-rc/~rc/' | sed 's/^v//' | sort -V | tail -n 5 | sed 's/~rc/-rc/; s/^/v/'
