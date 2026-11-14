@@ -2,7 +2,8 @@
 # Builds the signed repository from Andaru's releases.
 #   build-site RELEASES OUT
 # RELEASES holds a directory per release tag: its .deb files, its SHA256SUMS, and a file named prerelease for a
-# prerelease. Releases go to the trixie suite; trixie-test has prereleases too. Every package must match its
+# prerelease. Releases go to the trixie suite; trixie-test has prereleases too, and so does a package whose version
+# has a ~ (a candidate), whatever GitHub's flag says. Every package must match its
 # release's SHA256SUMS, or nothing is built. SIGNING_KEY names the key in GNUPGHOME that signs.
 set -eu
 
@@ -33,13 +34,12 @@ for release in "$releases"/*/; do
 		package=$(dpkg-deb -f "$deb" Package)
 		mkdir -p "$site/pool/main/a/$package"
 		cp "$deb" "$site/pool/main/a/$package/"
-		[ ! -e "$release/prerelease" ] || echo "pool/main/a/$package/$(basename "$deb")" >>"$site/prereleases"
+		[ ! -e "$release/prerelease" ] && ! dpkg-deb -f "$deb" Version | grep -q '~' || echo "pool/main/a/$package/$(basename "$deb")" >>"$site/prereleases"
 	done
 done
 touch "$site/prereleases"
 
 cd "$site"
-date=$(date -u -R)
 for suite in trixie trixie-test; do
 	for arch in amd64 arm64; do
 		dir=dists/$suite/main/binary-$arch
@@ -60,7 +60,7 @@ for suite in trixie trixie-test; do
 		-o APT::FTPArchive::Release::Origin=Andaru -o APT::FTPArchive::Release::Label=Andaru \
 		-o APT::FTPArchive::Release::Suite="$suite" -o APT::FTPArchive::Release::Codename="$suite" \
 		-o APT::FTPArchive::Release::Architectures="amd64 arm64" -o APT::FTPArchive::Release::Components=main \
-		-o APT::FTPArchive::Release::Date="$date" -o APT::FTPArchive::Release::ValidTime=1209600 \
+		-o APT::FTPArchive::Release::ValidTime=1209600 \
 		release "dists/$suite" >Release
 	mv Release "dists/$suite/Release"
 	gpg --batch --yes --local-user "$SIGNING_KEY!" --clearsign -o "dists/$suite/InRelease" "dists/$suite/Release"
@@ -75,5 +75,6 @@ cp "$here/andaru-archive-key.asc" "$here/README.md" .
 echo apt.andaru.io >CNAME
 
 cd - >/dev/null
-mkdir -p "$(dirname "$out")"
-cp -r "$site" "$out"
+chmod 0755 "$site"
+mkdir -p "$out"
+cp -r "$site/." "$out"

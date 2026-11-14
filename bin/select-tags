@@ -1,9 +1,18 @@
 #!/bin/sh
-# Reads Andaru's release tags on stdin and prints the ones the repository serves: every keyring-* release, and the
-# five newest Andaru versions (v1.2.3-rcN is 1.2.3~rcN, older than 1.2.3). Older releases stay on GitHub only:
-# a release is about 25 MB, and GitHub Pages sites are limited to 1 GB.
+# Reads Andaru's release tags on stdin and prints the ones the repository serves: every keyring release, the five
+# newest releases, and the release candidates newer than the newest release (v1.2.3-rcN is 1.2.3~rcN, older than
+# 1.2.3). Older ones stay on GitHub only: a release is about 25 MB, and GitHub Pages sites are limited to 1 GB.
 set -eu
 
+n='(0|[1-9][0-9]*)'
 tags=$(cat)
-printf '%s\n' "$tags" | grep '^keyring-' || true
-printf '%s\n' "$tags" | grep '^v' | sed 's/-rc/~rc/' | sed 's/^v//' | sort -V | tail -n 5 | sed 's/~rc/-rc/; s/^/v/'
+printf '%s\n' "$tags" | grep -Ex 'keyring-[0-9]{4}\.[0-9]{2}\.[0-9]{2}' || true
+releases=$(printf '%s\n' "$tags" | grep -Ex "v$n\.$n\.$n" | sed 's/^v//' | sort -V || true)
+printf '%s\n' "$releases" | tail -n 5 | sed '/^$/d; s/^/v/'
+newest=$(printf '%s\n' "$releases" | tail -n 1)
+printf '%s\n' "$tags" | grep -Ex "v$n\.$n\.$n-rc[1-9][0-9]*" | sed 's/^v//; s/-rc/~rc/' |
+	while read -r candidate; do
+		if [ -z "$newest" ] || [ "$(printf '%s\n%s\n' "$newest" "$candidate" | sort -V | tail -n 1)" = "$candidate" ]; then
+			printf 'v%s\n' "$candidate" | sed 's/~rc/-rc/'
+		fi
+	done

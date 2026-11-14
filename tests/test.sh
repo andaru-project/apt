@@ -18,20 +18,31 @@ check() {
 	fi
 }
 
-# select-tags: every keyring release, and the five newest Andaru versions by Debian ordering (~rc before release).
-selected=$(printf '%s\n' v0.4.0 v0.4.0-rc1 v0.4.0-rc2 v0.3.0 v0.5.0 v0.10.0 keyring-2026.11.14 v0.9.0 |
+# select-tags: every keyring release, the five newest releases, and the candidates newer than the newest release.
+selected=$(printf '%s\n' v0.4.0 v0.4.0-rc1 v0.3.0 v0.5.0 v0.10.0 keyring-2026.11.14 v0.9.0 v0.2.0 v0.11.0-rc1 v0.9.0-rc1 |
 	sh "$here/bin/select-tags" | sort | tr '\n' ' ')
-check "select-tags keeps the keyring and the five newest versions" \
-	'[ "$selected" = "keyring-2026.11.14 v0.10.0 v0.4.0 v0.4.0-rc2 v0.5.0 v0.9.0 " ]'
+check "select-tags keeps the keyring, five releases and newer candidates" \
+	'[ "$selected" = "keyring-2026.11.14 v0.10.0 v0.11.0-rc1 v0.3.0 v0.4.0 v0.5.0 v0.9.0 " ]'
+selected=$(printf '%s\n' v0.4.0 v0.5.0-rc1 v0.5.0-rc2 v0.5.0-rc3 v0.5.0-rc4 v0.5.0-rc5 v0.5.0-rc6 | sh "$here/bin/select-tags" |
+	sort | tr '\n' ' ')
+check "candidates never evict the newest release" '[ "$selected" = "v0.4.0 v0.5.0-rc1 v0.5.0-rc2 v0.5.0-rc3 v0.5.0-rc4 v0.5.0-rc5 v0.5.0-rc6 " ]'
+selected=$(printf '%s\n' v0.4 vfoo v1.2.3-rc keyring-x v0.4.0 | sh "$here/bin/select-tags" | tr '\n' ' ')
+check "select-tags ignores tags that are not releases" '[ "$selected" = "v0.4.0 " ]'
 
 # A throwaway signing key, as the workflow imports the real subkey.
 export GNUPGHOME="$work/gnupg"
 mkdir -m 0700 "$GNUPGHOME"
 printf "%s\n" quiet >"$GNUPGHOME/gpg.conf"
-gpg --batch --quiet --no-tty --passphrase '' --quick-gen-key 'Test <test@example.invalid>' ed25519 sign never
-SIGNING_KEY=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+# As the archive key: a certify-only primary and a signing subkey, and only the subkey's secret is here.
+gpg --batch --quiet --no-tty --passphrase '' --quick-gen-key 'Test <test@example.invalid>' ed25519 cert never
+primary=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+gpg --batch --quiet --no-tty --passphrase '' --quick-add-key "$primary" ed25519 sign never
+SIGNING_KEY=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { n++ } $1 == "fpr" && n == 2 { print $10 }')
 export SIGNING_KEY
-gpg --batch --export "$SIGNING_KEY" >"$work/keyring.gpg"
+gpg --batch --export "$primary" >"$work/keyring.gpg"
+gpg --batch --export-secret-subkeys "$SIGNING_KEY!" >"$work/subkey.gpg"
+gpg --batch --yes --delete-secret-keys "$primary"
+gpg --batch --quiet --import "$work/subkey.gpg"
 
 deb() { # deb TAG PACKAGE VERSION ARCH
 	d=$work/pkg/$2-$3-$4
@@ -49,6 +60,8 @@ deb v0.4.0 andaru 0.4.0-1 arm64
 sums v0.4.0
 deb v0.5.0-rc1 andaru '0.5.0~rc1-1' amd64
 sums v0.5.0-rc1
+deb v0.6.0-rc1 andaru '0.6.0~rc1-1' amd64
+sums v0.6.0-rc1
 touch "$work/releases/v0.5.0-rc1/prerelease"
 
 sh "$here/bin/build-site" "$work/releases" "$work/site"
@@ -66,6 +79,8 @@ check "a release reaches trixie" \
 	'grep -qx "Version: 0.4.0-1" "$site/dists/trixie/main/binary-arm64/Packages"'
 check "a prerelease stays out of trixie" \
 	'! grep -q "~rc1" "$site/dists/trixie/main/binary-amd64/Packages"'
+check "a candidate without GitHub's prerelease flag stays out of trixie" \
+	'! grep -qF "0.6.0~rc1" "$site/dists/trixie/main/binary-amd64/Packages"'
 check "a prerelease reaches trixie-test" \
 	'grep -qx "Version: 0.5.0~rc1-1" "$site/dists/trixie-test/main/binary-amd64/Packages"'
 check "the keyring is in both architectures' indexes" \
