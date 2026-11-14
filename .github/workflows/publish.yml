@@ -56,6 +56,16 @@ jobs:
             --jq '.[] | "\(.tagName) \(.isPrerelease)"' >releases.txt
           cut -d' ' -f1 releases.txt | sh bin/select-tags >selected.txt
           sh bin/download-releases releases.txt releases <selected.txt
+          # The live indexes, kept by hash one generation back; a 404 (first run, new suite) just means none.
+          for suite in trixie trixie-test; do
+            for arch in amd64 arm64; do
+              dir=previous/dists/$suite/main/binary-$arch
+              mkdir -p "$dir"
+              for index in Packages Packages.gz; do
+                curl -fsS -o "$dir/$index" "https://apt.andaru.io/dists/$suite/main/binary-$arch/$index" || rm -f "$dir/$index"
+              done
+            done
+          done
 
       - name: Build and sign
         env:
@@ -70,7 +80,7 @@ jobs:
           printf '%s\n' "$APT_SIGNING_KEY" | gpg --batch --quiet --import
           # An expired subkey stops signing and the site goes stale; failing early here raises the issue below.
           sh bin/check-expiry "$SIGNING_KEY" 90
-          sh bin/build-site releases _site
+          sh bin/build-site releases _site previous
 
       - name: Keep the site
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

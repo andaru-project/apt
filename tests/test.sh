@@ -124,6 +124,18 @@ packages=$site/dists/trixie/main/binary-amd64/Packages
 sum=$(sha256sum "$packages" | cut -d' ' -f1)
 check "Packages is also served by hash" '[ -f "$(dirname "$packages")/by-hash/SHA256/$sum" ] && cmp -s "$packages" "$(dirname "$packages")/by-hash/SHA256/$sum"'
 
+# The previous run's indexes stay under by-hash, for clients holding the CDN's cached previous InRelease.
+prev=$work/previous/dists/trixie/main/binary-amd64
+mkdir -p "$prev"
+echo old >"$prev/Packages"
+gzip -n -c "$prev/Packages" >"$prev/Packages.gz"
+sh "$here/bin/build-site" "$work/releases" "$work/site-prev" "$work/previous" 2>/dev/null || true
+oldsum=$(sha256sum "$prev/Packages" | cut -d' ' -f1)
+oldgzsum=$(sha256sum "$prev/Packages.gz" | cut -d' ' -f1)
+h=$work/site-prev/dists/trixie/main/binary-amd64/by-hash/SHA256
+check "the previous Packages and Packages.gz are kept by hash" \
+	'cmp -s "$prev/Packages" "$h/$oldsum" && cmp -s "$prev/Packages.gz" "$h/$oldgzsum"'
+
 # download-releases: a release without a .deb or SHA256SUMS is skipped with a warning, a complete one is fetched.
 mkdir "$work/fakebin"
 cat >"$work/fakebin/gh" <<'F'
