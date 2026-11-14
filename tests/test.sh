@@ -29,7 +29,39 @@ check "candidates never evict the newest release" '[ "$selected" = "v0.4.0 v0.5.
 selected=$(printf '%s\n' v0.4 vfoo v1.2.3-rc keyring-x v0.4.0 | sh "$here/bin/select-tags" | tr '\n' ' ')
 check "select-tags ignores tags that are not releases" '[ "$selected" = "v0.4.0 " ]'
 
+selected=$(printf '%s\n' v01.2.3 v1.02.3 v1.2.03 v1x2y3 v1.2.3-rc01 v1x2.3-rc1 keyring-2026x11x14 v1.2.3 | sh "$here/bin/select-tags" |
+	tr '\n' ' ')
+check "select-tags wants no leading zeros and literal dots" '[ "$selected" = "v1.2.3 " ]'
+
+# check-expiry: fails when the signing subkey or its primary expires within the given days, or the key is unknown.
+# genkey NAME PRIMARY_EXPIRY SUBKEY_EXPIRY leaves the subkey's fingerprint in $work/NAME-key, in its own GNUPGHOME.
+# shellcheck disable=SC2030,SC2031 # the subshell keeps each key's GNUPGHOME apart
+genkey() {
+	(
+		export GNUPGHOME="$work/gnupg-$1"
+		mkdir -m 0700 "$GNUPGHOME"
+		gpg --batch --quiet --no-tty --passphrase '' --quick-gen-key "$1 <$1@example.invalid>" ed25519 cert "$2"
+		p=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+		gpg --batch --quiet --no-tty --passphrase '' --quick-add-key "$p" ed25519 sign "$3"
+		gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { n++ } $1 == "fpr" && n == 2 { print $10 }' >"$work/$1-key"
+	)
+}
+genkey soon never 30d
+genkey forever never never
+genkey primarysoon 5d never
+check "check-expiry fails for a subkey expiring within the window" \
+	'! GNUPGHOME="$work/gnupg-soon" sh "$here/bin/check-expiry" "$(cat "$work/soon-key")" 90 2>/dev/null'
+check "check-expiry passes for a subkey expiring after the window" \
+	'GNUPGHOME="$work/gnupg-soon" sh "$here/bin/check-expiry" "$(cat "$work/soon-key")" 10'
+check "check-expiry passes for a key that never expires" \
+	'GNUPGHOME="$work/gnupg-forever" sh "$here/bin/check-expiry" "$(cat "$work/forever-key")" 90'
+check "check-expiry fails when the primary expires within the window" \
+	'! GNUPGHOME="$work/gnupg-primarysoon" sh "$here/bin/check-expiry" "$(cat "$work/primarysoon-key")" 90 2>/dev/null'
+check "check-expiry fails for an unknown key" \
+	'! GNUPGHOME="$work/gnupg-forever" sh "$here/bin/check-expiry" "$(cat "$work/soon-key")" 10 2>/dev/null'
+
 # A throwaway signing key, as the workflow imports the real subkey.
+# shellcheck disable=SC2031 # the subshell above used its own GNUPGHOME
 export GNUPGHOME="$work/gnupg"
 mkdir -m 0700 "$GNUPGHOME"
 printf "%s\n" quiet >"$GNUPGHOME/gpg.conf"
@@ -91,12 +123,94 @@ check "the public key is at the root" '[ -f "$site/andaru-archive-key.asc" ]'
 check "Packages.gz matches Packages" \
 	'gzip -dc "$site/dists/trixie/main/binary-amd64/Packages.gz" | cmp -s - "$site/dists/trixie/main/binary-amd64/Packages"'
 
+for suite in trixie trixie-test; do
+	r=$site/dists/$suite/Release
+	check "$suite Release names itself, its origin and both architectures" \
+		'grep -qx "Suite: $suite" "$r" && grep -qx "Codename: $suite" "$r" && grep -qx "Origin: Andaru" "$r" &&
+		grep -qx "Architectures: amd64 arm64" "$r"'
+done
+check "Release asks clients for by-hash" 'grep -qx "Acquire-By-Hash: yes" "$site/dists/trixie/Release"'
+# apt fetches an index by the strongest hash Release lists, so every listed hash type needs its by-hash directory.
+# (apt-ftparchive writes by-hash directories for SHA256 and SHA512 only; apt never asks for MD5Sum or SHA1.)
+hashsum() { # hashsum TYPE FILE: the hash apt-ftparchive names TYPE
+	case $1 in
+	MD5Sum) md5sum "$2" ;;
+	SHA1) sha1sum "$2" ;;
+	SHA256) sha256sum "$2" ;;
+	SHA512) sha512sum "$2" ;;
+	esac | cut -d' ' -f1
+}
+hashtypes() { awk '/^SHA(256|512):$/ { sub(":", ""); print }' "$1"; }
+check "Release lists SHA256 and SHA512" \
+	'hashtypes "$site/dists/trixie/Release" | grep -qx SHA256 && hashtypes "$site/dists/trixie/Release" | grep -qx SHA512'
+for suite in trixie trixie-test; do
+	for arch in amd64 arm64; do
+		dir=$site/dists/$suite/main/binary-$arch
+		for type in $(hashtypes "$site/dists/$suite/Release"); do
+			for index in Packages Packages.gz; do
+				check "$suite $arch $index is served by $type hash" \
+					'cmp -s "$dir/$index" "$dir/by-hash/$type/$(hashsum "$type" "$dir/$index")"'
+			done
+		done
+	done
+done
+
+# The previous run's indexes stay under by-hash, for clients holding the CDN's cached previous InRelease.
+for suite in trixie trixie-test; do
+	for arch in amd64 arm64; do
+		mkdir -p "$work/previous/dists/$suite/main/binary-$arch"
+		echo "old $suite $arch" | gzip -n >"$work/previous/dists/$suite/main/binary-$arch/Packages.gz"
+	done
+done
+# previous is relative here, as in the workflow
+(cd "$work" && sh "$here/bin/build-site" releases site-prev previous)
+for suite in trixie trixie-test; do
+	for arch in amd64 arm64; do
+		old=$work/previous/dists/$suite/main/binary-$arch/Packages.gz
+		dir=$work/site-prev/dists/$suite/main/binary-$arch
+		for type in $(hashtypes "$work/site-prev/dists/$suite/Release"); do
+			check "$suite $arch previous Packages.gz is kept by $type hash" \
+				'cmp -s "$old" "$dir/by-hash/$type/$(hashsum "$type" "$old")" && cmp -s "$dir/Packages.gz" "$dir/by-hash/$type/$(hashsum "$type" "$dir/Packages.gz")"'
+		done
+	done
+done
+
+# download-releases: a release without a .deb or SHA256SUMS is skipped with a warning, a complete one is fetched.
+mkdir "$work/fakebin" "$work/failbin"
+cat >"$work/fakebin/gh" <<'F'
+#!/bin/sh
+# Fake gh: release view TAG prints the assets (v1: complete, v2: no SHA256SUMS, v3: no assets, v4: no .deb but xdeb,
+# v5: SHA256SUMS.sig only); release download TAG -D DIR.
+tag=$3
+case $2 in
+view) case $tag in v1) printf 'a.deb\nSHA256SUMS\n' ;; v2) echo a.deb ;; v4) printf 'xdeb\nSHA256SUMS\n' ;; v5) printf 'a.deb\nSHA256SUMS.sig\n' ;; esac ;;
+download) while [ "$1" != -D ]; do shift; done; mkdir -p "$2"; : >"$2/a.deb" ;;
+esac
+F
+printf '#!/bin/sh\nexit 1\n' >"$work/failbin/gh"
+chmod +x "$work/fakebin/gh" "$work/failbin/gh"
+printf '%s\n' 'v1 true' 'v2 false' 'v3 false' 'v4 false' 'v5 false' >"$work/rel.txt"
+out=$(printf '%s\n' v1 v2 v3 v4 v5 | PATH="$work/fakebin:$PATH" sh "$here/bin/download-releases" "$work/rel.txt" "$work/dl")
+check "download-releases skips an incomplete release with a warning" \
+	'[ -f "$work/dl/v1/a.deb" ] && [ -f "$work/dl/v1/prerelease" ] && [ ! -e "$work/dl/v2" ] && [ ! -e "$work/dl/v3" ] &&
+	[ ! -e "$work/dl/v4" ] && [ ! -e "$work/dl/v5" ] &&
+	printf "%s\n" "$out" | grep -q "^::warning::.*v2" && printf "%s\n" "$out" | grep -q "^::warning::.*v3"'
+check "download-releases fails when gh fails" \
+	'! echo v1 | PATH="$work/failbin:$PATH" sh "$here/bin/download-releases" "$work/rel.txt" "$work/dl-fail" >/dev/null 2>&1'
+
 # Without any prerelease, trixie still has every release.
 mkdir "$work/releases-only"
 cp -r "$work/releases/v0.4.0" "$work/releases/keyring-2026.11.14" "$work/releases-only/"
 sh "$here/bin/build-site" "$work/releases-only" "$work/site-only"
 check "without a prerelease, trixie has the releases" \
 	'grep -qx "Version: 0.4.0-1" "$work/site-only/dists/trixie/main/binary-amd64/Packages"'
+
+# Without the keyring release there is no bootstrap package: a clear error, nothing built.
+mkdir "$work/releases-nokeyring"
+cp -r "$work/releases/v0.4.0" "$work/releases-nokeyring/"
+nokeyring=$(sh "$here/bin/build-site" "$work/releases-nokeyring" "$work/site-nokeyring" 2>&1 || true)
+check "a missing keyring package is a clear error" \
+	'printf "%s\n" "$nokeyring" | grep -q "no andaru-archive-keyring package" && [ ! -e "$work/site-nokeyring" ]'
 
 # A package that does not match its release's checksums is refused, and nothing is built.
 echo corrupt >>"$work/releases/v0.4.0/andaru_0.4.0-1_amd64.deb"

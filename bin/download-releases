@@ -1,0 +1,19 @@
+#!/bin/sh
+# Downloads the .deb files and SHA256SUMS of the releases whose tags are on stdin.
+#   download-releases RELEASES.TXT OUT
+# RELEASES.TXT has a "TAG isPrerelease" line per release. A release without a .deb or without SHA256SUMS (published
+# before its assets were uploaded) is skipped with a warning, so it cannot halt publishing; build-site still refuses
+# any asset that is present but wrong.
+set -eu
+
+while read -r tag; do
+	assets=$(gh release view "$tag" -R andaru-project/andaru --json assets --jq '.assets[].name')
+	if ! printf '%s\n' "$assets" | grep -q '\.deb$' || ! printf '%s\n' "$assets" | grep -qx SHA256SUMS; then
+		echo "::warning::release $tag has no .deb or no SHA256SUMS and is skipped"
+		continue
+	fi
+	gh release download "$tag" -R andaru-project/andaru -D "$2/$tag" -p '*.deb' -p SHA256SUMS
+	if grep -qx "$tag true" "$1"; then
+		touch "$2/$tag/prerelease"
+	fi
+done
