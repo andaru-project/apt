@@ -1,0 +1,14 @@
+#!/bin/sh
+# check-expiry FINGERPRINT DAYS: fails when the key in GNUPGHOME expires, or has expired, within DAYS days.
+set -eu
+
+gpg --batch --with-colons --list-secret-keys | awk -F: -v key="$1" -v limit="$(($(date +%s) + $2 * 86400))" '
+	$1 == "sec" || $1 == "ssb" { expires = $7 }
+	$1 == "fpr" && $10 == key {
+		found = 1
+		if (expires != "" && expires < limit) {
+			print "check-expiry: " key " expires within the window" >"/dev/stderr"
+			bad = 1
+		}
+	}
+	END { exit !found || bad }'

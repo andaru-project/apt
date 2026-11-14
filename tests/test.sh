@@ -29,6 +29,27 @@ check "candidates never evict the newest release" '[ "$selected" = "v0.4.0 v0.5.
 selected=$(printf '%s\n' v0.4 vfoo v1.2.3-rc keyring-x v0.4.0 | sh "$here/bin/select-tags" | tr '\n' ' ')
 check "select-tags ignores tags that are not releases" '[ "$selected" = "v0.4.0 " ]'
 
+selected=$(printf '%s\n' v01.2.3 v1.02.3 v1.2.03 v1x2y3 v1.2.3-rc01 v1x2.3-rc1 keyring-2026x11x14 v1.2.3 | sh "$here/bin/select-tags" |
+	tr '\n' ' ')
+check "select-tags wants no leading zeros and literal dots" '[ "$selected" = "v1.2.3 " ]'
+
+# check-expiry: fails when the signing subkey expires within the given days.
+# shellcheck disable=SC2030,SC2031 # the subshell keeps the expiry key's GNUPGHOME apart
+(
+	export GNUPGHOME="$work/gnupg-expiry"
+	mkdir -m 0700 "$GNUPGHOME"
+	gpg --batch --quiet --no-tty --passphrase '' --quick-gen-key 'Exp <exp@example.invalid>' ed25519 cert never
+	p=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+	gpg --batch --quiet --no-tty --passphrase '' --quick-add-key "$p" ed25519 sign 30d
+	k=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { n++ } $1 == "fpr" && n == 2 { print $10 }')
+	echo "$k" >"$work/expiring-key"
+)
+expiring=$(cat "$work/expiring-key")
+check "check-expiry fails for a subkey expiring within the window" \
+	'! GNUPGHOME="$work/gnupg-expiry" sh "$here/bin/check-expiry" "$expiring" 90 2>/dev/null'
+check "check-expiry passes for a subkey expiring after the window" \
+	'GNUPGHOME="$work/gnupg-expiry" sh "$here/bin/check-expiry" "$expiring" 10'
+
 # A throwaway signing key, as the workflow imports the real subkey.
 export GNUPGHOME="$work/gnupg"
 mkdir -m 0700 "$GNUPGHOME"
@@ -90,6 +111,35 @@ check "the bootstrap package and its checksum are at the root" \
 check "the public key is at the root" '[ -f "$site/andaru-archive-key.asc" ]'
 check "Packages.gz matches Packages" \
 	'gzip -dc "$site/dists/trixie/main/binary-amd64/Packages.gz" | cmp -s - "$site/dists/trixie/main/binary-amd64/Packages"'
+
+for suite in trixie trixie-test; do
+	r=$site/dists/$suite/Release
+	check "$suite Release names itself, its origin and both architectures" \
+		'grep -qx "Suite: $suite" "$r" && grep -qx "Codename: $suite" "$r" && grep -qx "Origin: Andaru" "$r" &&
+		grep -qx "Architectures: amd64 arm64" "$r"'
+done
+check "Release asks clients for by-hash" 'grep -qx "Acquire-By-Hash: yes" "$site/dists/trixie/Release"'
+packages=$site/dists/trixie/main/binary-amd64/Packages
+sum=$(sha256sum "$packages" | cut -d' ' -f1)
+check "Packages is also served by hash" '[ -f "$(dirname "$packages")/by-hash/SHA256/$sum" ] && cmp -s "$packages" "$(dirname "$packages")/by-hash/SHA256/$sum"'
+
+# download-releases: a release without a .deb or SHA256SUMS is skipped with a warning, a complete one is fetched.
+mkdir "$work/fakebin"
+cat >"$work/fakebin/gh" <<'F'
+#!/bin/sh
+# Fake gh: release view TAG prints the assets (v1: complete, v2: no SHA256SUMS, v3: no assets); release download TAG -D DIR.
+tag=$3
+case $2 in
+view) case $tag in v1) printf 'a.deb\nSHA256SUMS\n' ;; v2) echo a.deb ;; esac ;;
+download) while [ "$1" != -D ]; do shift; done; mkdir -p "$2"; : >"$2/a.deb" ;;
+esac
+F
+chmod +x "$work/fakebin/gh"
+printf '%s\n' 'v1 true' 'v2 false' 'v3 false' >"$work/rel.txt"
+out=$(printf '%s\n' v1 v2 v3 | PATH="$work/fakebin:$PATH" sh "$here/bin/download-releases" "$work/rel.txt" "$work/dl")
+check "download-releases skips an incomplete release with a warning" \
+	'[ -f "$work/dl/v1/a.deb" ] && [ -f "$work/dl/v1/prerelease" ] && [ ! -e "$work/dl/v2" ] && [ ! -e "$work/dl/v3" ] &&
+	printf "%s\n" "$out" | grep -q "^::warning::.*v2" && printf "%s\n" "$out" | grep -q "^::warning::.*v3"'
 
 # Without any prerelease, trixie still has every release.
 mkdir "$work/releases-only"

@@ -60,7 +60,7 @@ for suite in trixie trixie-test; do
 		-o APT::FTPArchive::Release::Origin=Andaru -o APT::FTPArchive::Release::Label=Andaru \
 		-o APT::FTPArchive::Release::Suite="$suite" -o APT::FTPArchive::Release::Codename="$suite" \
 		-o APT::FTPArchive::Release::Architectures="amd64 arm64" -o APT::FTPArchive::Release::Components=main \
-		-o APT::FTPArchive::Release::ValidTime=1209600 \
+		-o APT::FTPArchive::Release::ValidTime=1209600 -o APT::FTPArchive::DoByHash=true \
 		release "dists/$suite" >Release
 	mv Release "dists/$suite/Release"
 	gpg --batch --yes --local-user "$SIGNING_KEY!" --clearsign -o "dists/$suite/InRelease" "dists/$suite/Release"
@@ -72,9 +72,7 @@ rm prereleases
 cp pool/main/a/andaru-archive-keyring/*.deb .
 sha256sum ./*.deb | sed 's| \./| |' >SHA256SUMS
 cp "$here/andaru-archive-key.asc" "$here/README.md" .
-echo apt.andaru.io >CNAME
 
 cd - >/dev/null
-chmod 0755 "$site"
 mkdir -p "$out"
 cp -r "$site/." "$out"

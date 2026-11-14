@@ -8,4 +8,7 @@ The site is not kept in this repository: `.github/workflows/publish.yml` rebuild
 
 - `trixie` serves the five newest Andaru releases; `trixie-test` also serves the release candidates newer than the newest release.
 - Every package must match its release's `SHA256SUMS`, or nothing is published.
+- A release without a `.deb` or without `SHA256SUMS` (for example one published before its assets were uploaded) is skipped with a workflow warning, so it cannot halt publishing.
+- Indexes are also served under `by-hash/` (`Acquire-By-Hash: yes`), so a client never mixes a new `InRelease` with a cached old `Packages`.
+- When a scheduled or manual run fails, including when the signing subkey expires within 90 days, the workflow opens an issue titled "Publishing failed" with the run URL, or comments on the open one.
 - `sh tests/test.sh` tests the scripts with a throwaway key (needs `dpkg`, `apt-utils`, `gpg`, `gpgv`).

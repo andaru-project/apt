@@ -55,12 +55,7 @@ jobs:
           gh release list -R andaru-project/andaru --exclude-drafts --limit 1000 --json tagName,isPrerelease \
             --jq '.[] | "\(.tagName) \(.isPrerelease)"' >releases.txt
           cut -d' ' -f1 releases.txt | sh bin/select-tags >selected.txt
-          while read -r tag; do
-            gh release download "$tag" -R andaru-project/andaru -D "releases/$tag" -p '*.deb' -p SHA256SUMS
-            if grep -qx "$tag true" releases.txt; then
-              touch "releases/$tag/prerelease"
-            fi
-          done <selected.txt
+          sh bin/download-releases releases.txt releases <selected.txt
 
       - name: Build and sign
         env:
@@ -73,6 +68,8 @@ jobs:
           export GNUPGHOME
           trap 'rm -rf -- "$GNUPGHOME"' EXIT
           printf '%s\n' "$APT_SIGNING_KEY" | gpg --batch --quiet --import
+          # An expired subkey stops signing and the site goes stale; failing early here raises the issue below.
+          sh bin/check-expiry "$SIGNING_KEY" 90
           sh bin/build-site releases _site
 
       - name: Keep the site
@@ -106,3 +103,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/publish.yml/enable"
+
+  # A failed scheduled or manual run would otherwise go unnoticed until Valid-Until lapses. One open issue collects them.
+  alert:
+    needs: [test, build, deploy]
+    if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          number=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --json number,title \
+            --jq '[.[] | select(.title == "Publishing failed")][0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" -R "$GITHUB_REPOSITORY" --body "Failed again: $url"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title 'Publishing failed' --body "The publish workflow failed: $url"
+          fi
