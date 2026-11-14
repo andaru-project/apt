@@ -40,6 +40,8 @@ jobs:
     runs-on: ubuntu-24.04
     # APT_SIGNING_KEY is a secret of this environment, which only main may use: a branch cannot read it.
     environment: signing
+    outputs:
+      expiry: ${{ steps.expiry.outcome }}
     steps:
       - name: Check out
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -56,16 +58,31 @@ jobs:
             --jq '.[] | "\(.tagName) \(.isPrerelease)"' >releases.txt
           cut -d' ' -f1 releases.txt | sh bin/select-tags >selected.txt
           sh bin/download-releases releases.txt releases <selected.txt
-          # The live indexes, kept by hash one generation back; a 404 (first run, new suite) just means none.
+          # The live index, kept by hash one generation back; a 404 (first run, new suite) just means none.
           for suite in trixie trixie-test; do
             for arch in amd64 arm64; do
               dir=previous/dists/$suite/main/binary-$arch
               mkdir -p "$dir"
-              for index in Packages Packages.gz; do
-                curl -fsS -o "$dir/$index" "https://apt.andaru.io/dists/$suite/main/binary-$arch/$index" || rm -f "$dir/$index"
-              done
+              curl -fsS --retry 3 -o "$dir/Packages.gz" "https://apt.andaru.io/dists/$suite/main/binary-$arch/Packages.gz" ||
+                rm -f "$dir/Packages.gz"
             done
           done
+
+      # A key about to expire must not stop publishing: the step only reports, and the alert job reads its outcome.
+      # gpg signing fails by itself once the key is truly unusable.
+      - name: Check the signing key's expiry
+        id: expiry
+        continue-on-error: true
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+          SIGNING_KEY: 67BF6A43DD97A19C2AEDE7294FA659D5E10049DD
+        run: |
+          set -eu
+          GNUPGHOME=$(mktemp -d)
+          export GNUPGHOME
+          trap 'rm -rf -- "$GNUPGHOME"' EXIT
+          printf '%s\n' "$APT_SIGNING_KEY" | gpg --batch --quiet --import
+          sh bin/check-expiry "$SIGNING_KEY" 90
 
       - name: Build and sign
         env:
@@ -78,8 +95,6 @@ jobs:
           export GNUPGHOME
           trap 'rm -rf -- "$GNUPGHOME"' EXIT
           printf '%s\n' "$APT_SIGNING_KEY" | gpg --batch --quiet --import
-          # An expired subkey stops signing and the site goes stale; failing early here raises the issue below.
-          sh bin/check-expiry "$SIGNING_KEY" 90
           sh bin/build-site releases _site previous
 
       - name: Keep the site
@@ -114,10 +129,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/publish.yml/enable"
 
-  # A failed scheduled or manual run would otherwise go unnoticed until Valid-Until lapses. One open issue collects them.
+  # A failed scheduled or manual run would otherwise go unnoticed until Valid-Until lapses, and so would a signing key
+  # about to expire (the build still publishes then). One open issue per title collects them.
   alert:
-    needs: [test, build, deploy]
-    if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: [test, build, deploy, keepalive]
+    if: >-
+      always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      (contains(needs.*.result, 'failure') || needs.build.outputs.expiry == 'failure')
     runs-on: ubuntu-24.04
     permissions:
       issues: write
@@ -125,13 +143,20 @@ jobs:
       - name: Open or update the issue
         env:
           GH_TOKEN: ${{ github.token }}
+          EXPIRY_ONLY: ${{ !contains(needs.*.result, 'failure') }}
         run: |
           set -eu
           url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          number=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --json number,title \
-            --jq '[.[] | select(.title == "Publishing failed")][0].number // empty')
+          title='Publishing failed'
+          body="The publish workflow failed: $url"
+          if [ "$EXPIRY_ONLY" = true ]; then
+            title='Signing key expires soon'
+            body="Publishing still works, but the signing key expires within 90 days: $url"
+          fi
+          number=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 200 --json number,title \
+            --jq "[.[] | select(.title == \"$title\")][0].number // empty")
           if [ -n "$number" ]; then
-            gh issue comment "$number" -R "$GITHUB_REPOSITORY" --body "Failed again: $url"
+            gh issue comment "$number" -R "$GITHUB_REPOSITORY" --body "Again: $url"
           else
-            gh issue create -R "$GITHUB_REPOSITORY" --title 'Publishing failed' --body "The publish workflow failed: $url"
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body"
           fi

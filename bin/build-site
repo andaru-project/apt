@@ -1,8 +1,8 @@
 #!/bin/sh
 # Builds the signed repository from Andaru's releases.
 #   build-site RELEASES OUT [PREVIOUS]
-# PREVIOUS, if given, is a directory laid out like the live site (dists/SUITE/main/binary-ARCH/Packages and
-# Packages.gz); its indexes are kept under by-hash, one generation back.
+# PREVIOUS, if given, is a directory laid out like the live site (dists/SUITE/main/binary-ARCH/Packages.gz); that
+# Packages.gz is kept under by-hash, one generation back.
 # RELEASES holds a directory per release tag: its .deb files, its SHA256SUMS, and a file named prerelease for a
 # prerelease. Releases go to the trixie suite; trixie-test has prereleases too, and so does a package whose version
 # has a ~ (a candidate), whatever GitHub's flag says. Every package must match its
@@ -59,13 +59,6 @@ for suite in trixie trixie-test; do
 		fi
 		rm -f "$dir/Packages.all"
 		gzip -9n -k "$dir/Packages"
-		# Keep the previous run's indexes by hash: a client holding the CDN's cached previous InRelease asks for them.
-		for index in Packages Packages.gz; do
-			if [ -n "$previous" ] && [ -f "$previous/$dir/$index" ]; then
-				mkdir -p "$dir/by-hash/SHA256"
-				cp "$previous/$dir/$index" "$dir/by-hash/SHA256/$(sha256sum "$previous/$dir/$index" | cut -d' ' -f1)"
-			fi
-		done
 	done
 	apt-ftparchive \
 		-o APT::FTPArchive::Release::Origin=Andaru -o APT::FTPArchive::Release::Label=Andaru \
@@ -74,12 +67,31 @@ for suite in trixie trixie-test; do
 		-o APT::FTPArchive::Release::ValidTime=1209600 -o APT::FTPArchive::DoByHash=true \
 		release "dists/$suite" >Release
 	mv Release "dists/$suite/Release"
+	# Keep the previous run's Packages.gz under every hash directory apt-ftparchive wrote: apt fetches by the strongest
+	# hash, and a client holding the CDN's cached previous InRelease asks for the previous files. (apt takes the
+	# compressed index when one is listed, so the plain Packages is not kept.)
+	for arch in amd64 arm64; do
+		dir=dists/$suite/main/binary-$arch
+		[ -n "$previous" ] && [ -f "$previous/$dir/Packages.gz" ] || continue
+		for hashdir in "$dir"/by-hash/*/; do
+			case $hashdir in
+			*/SHA256/) sum=$(sha256sum "$previous/$dir/Packages.gz") ;;
+			*/SHA512/) sum=$(sha512sum "$previous/$dir/Packages.gz") ;;
+			*) continue ;;
+			esac
+			cp "$previous/$dir/Packages.gz" "$hashdir${sum%% *}"
+		done
+	done
 	gpg --batch --yes --local-user "$SIGNING_KEY!" --clearsign -o "dists/$suite/InRelease" "dists/$suite/Release"
 	gpg --batch --yes --local-user "$SIGNING_KEY!" --armor --detach-sign -o "dists/$suite/Release.gpg" "dists/$suite/Release"
 done
 rm prereleases
 
 # The bootstrap: the keyring packages and their checksums at the root, and the armoured key.
+ls pool/main/a/andaru-archive-keyring/*.deb >/dev/null 2>&1 || {
+	echo "build-site: no andaru-archive-keyring package among the releases" >&2
+	exit 1
+}
 cp pool/main/a/andaru-archive-keyring/*.deb .
 sha256sum ./*.deb | sed 's| \./| |' >SHA256SUMS
 cp "$here/andaru-archive-key.asc" "$here/README.md" .
