@@ -1,0 +1,108 @@
+name: Publish
+
+# Builds the repository from Andaru's GitHub releases, signs it with the archive's signing subkey and deploys it to
+# GitHub Pages (https://apt.andaru.io/). Daily, so Valid-Until (14 days) never lapses, and on demand after a release:
+#   gh workflow run publish -R andaru-project/apt
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Publishing runs one at a time, so two runs never deploy over each other. A newer pending run replaces an older
+# pending one, which loses nothing: every run rebuilds the whole site from the current releases. Pull requests run apart.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.run_id) || 'publish' }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Test
+        run: |
+          sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends apt-utils gpgv >/dev/null
+          sh tests/test.sh
+
+  build:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    # APT_SIGNING_KEY is a secret of this environment, which only main may use: a branch cannot read it.
+    environment: signing
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Download the releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends apt-utils >/dev/null
+          gh release list -R andaru-project/andaru --exclude-drafts --limit 1000 --json tagName,isPrerelease \
+            --jq '.[] | "\(.tagName) \(.isPrerelease)"' >releases.txt
+          cut -d' ' -f1 releases.txt | sh bin/select-tags >selected.txt
+          while read -r tag; do
+            gh release download "$tag" -R andaru-project/andaru -D "releases/$tag" -p '*.deb' -p SHA256SUMS
+            if grep -qx "$tag true" releases.txt; then
+              touch "releases/$tag/prerelease"
+            fi
+          done <selected.txt
+
+      - name: Build and sign
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+          # The signing subkey of primary 7CD6177785416B306999DEF2B5E7EDE2133D18DF.
+          SIGNING_KEY: 67BF6A43DD97A19C2AEDE7294FA659D5E10049DD
+        run: |
+          set -eu
+          GNUPGHOME=$(mktemp -d)
+          export GNUPGHOME
+          trap 'rm -rf -- "$GNUPGHOME"' EXIT
+          printf '%s\n' "$APT_SIGNING_KEY" | gpg --batch --quiet --import
+          sh bin/build-site releases _site
+
+      - name: Keep the site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  # GitHub disables a schedule after 60 days without repository activity; Valid-Until would then lapse 14 days later
+  # and every host's apt update would fail. Enabling the workflow again keeps the schedule alive.
+  keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: Keep the schedule enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/publish.yml/enable"
