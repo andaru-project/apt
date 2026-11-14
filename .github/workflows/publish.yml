@@ -14,6 +14,11 @@ on:
 permissions:
   contents: read
 
+# Publishing runs one at a time, in order, so an older site never replaces a newer one; pull requests run apart.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.run_id) || 'publish' }}
+  cancel-in-progress: false
+
 jobs:
   test:
     runs-on: ubuntu-24.04
@@ -77,9 +82,6 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-24.04
-    concurrency:
-      group: pages
-      cancel-in-progress: false
     permissions:
       pages: write
       id-token: write

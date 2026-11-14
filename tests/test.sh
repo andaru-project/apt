@@ -108,6 +108,14 @@ deb v0.4.0 andaru-extra 0.4.0-1 amd64
 check "a package missing from its checksums is refused" \
 	'! sh "$here/bin/build-site" "$work/releases" "$work/refused" 2>/dev/null && [ ! -e "$work/refused" ]'
 
+# A name that matches a listed one only as a regular expression (. for -) is not listed.
+rm "$work/releases/v0.4.0/andaru-extra_0.4.0-1_amd64.deb"
+deb v0.4.0 andaru-extra 0.4.0-1 amd64
+sums v0.4.0
+deb v0.4.0 andaru.extra 0.4.0-1 amd64
+check "a package listed only by a regular-expression match is refused" \
+	'! sh "$here/bin/build-site" "$work/releases" "$work/refused" 2>/dev/null && [ ! -e "$work/refused" ]'
+
 [ "$failures" -eq 0 ] || {
 	echo "$failures failed"
 	exit 1
