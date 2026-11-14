@@ -14,7 +14,8 @@ on:
 permissions:
   contents: read
 
-# Publishing runs one at a time, in order, so an older site never replaces a newer one; pull requests run apart.
+# Publishing runs one at a time, so two runs never deploy over each other. A newer pending run replaces an older
+# pending one, which loses nothing: every run rebuilds the whole site from the current releases. Pull requests run apart.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.run_id) || 'publish' }}
   cancel-in-progress: false
